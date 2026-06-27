@@ -456,6 +456,7 @@ module Simulation =
             history |> List.map float |> List.average |> int
         else history.[delay]
 
+    /// Перераспределение работников при обнаружении узкого места
     let reallocateWorkers (state: SystemState) (p: SimParams) =
         let stations = state.Stations |> Map.toList
         let overloaded = stations |> List.filter (fun (_, s) -> s.Queue > p.BottleneckThreshold)
@@ -474,16 +475,19 @@ module Simulation =
         else
             state.Stations, []
 
+    /// Один шаг симуляции
     let simulationTick (p: SimParams) (rng: Random) (state: SystemState) =
         let tick = state.Tick + 1
         let inflow = generateInflow tick rng
         let totalReceived = state.TotalReceived + inflow
 
+        // Входящий поток направляется на станцию A
         let stationsWithInflow =
             state.Stations |> Map.map (fun id s ->
                 if id = "Station-A" then { s with Queue = s.Queue + inflow }
                 else s)
 
+        // Обработка
         let processedList, processedCounts =
             stationsWithInflow
             |> Map.toList
@@ -494,11 +498,24 @@ module Simulation =
         let processedStations = processedList |> List.map (fun s -> s.Id, s) |> Map.ofList
         let totalDispatched = state.TotalDispatched + totalProcessed
 
+        // Обнаружение узких мест
         let bottleneckEvents =
             detectBottlenecks { state with Stations = processedStations } p
 
+        // Возврат работников, если нагрузка спала (простая эвристика)
+        let stationsAfterReturn =
+            processedStations |> Map.map (fun id s ->
+                let stA = processedStations.["Station-A"]
+                if id = "Station-A" && stA.Queue < p.BottleneckThreshold / 2 && s.Workers > 7 then
+                    { s with Workers = s.Workers - 1 }
+                elif id = "Station-B" && stA.Queue < p.BottleneckThreshold / 2 && s.Workers < 3 then
+                    { s with Workers = s.Workers + 1 }
+                else s
+            )
+
+        // Перераспределение при узком месте
         let finalStations, reallocationEvents =
-            reallocateWorkers { state with Stations = processedStations } p
+            reallocateWorkers { state with Stations = stationsAfterReturn } p
 
         let allEvents = bottleneckEvents @ reallocationEvents
 
@@ -520,10 +537,12 @@ module Simulation =
         let drawBar queue maxLen =
             let bars = String.replicate (min maxLen (queue / 2)) "█"
             sprintf "[%s] %d" bars queue
+        let estWaitA = if stA.Workers > 0 then float stA.Queue / float (stA.Workers * stA.BaseCapacityPerWorker) else 0.0
+        let estWaitB = if stB.Workers > 0 then float stB.Queue / float (stB.Workers * stB.BaseCapacityPerWorker) else 0.0
 
         printfn "-----------------------------------------------------------------------------------------"
-        printfn "Tick: %03d | Total Received: %3d | Total Dispatched: %3d | System Queue: %d"
-            state.Tick state.TotalReceived state.TotalDispatched (stA.Queue + stB.Queue)
+        printfn "Tick: %03d | Received: %3d | Dispatched: %3d | Queue: %d | Est.wait A: %.1f B: %.1f"
+            state.Tick state.TotalReceived state.TotalDispatched (stA.Queue + stB.Queue) estWaitA estWaitB
         printfn "  Station A (Main) | Workers: %d | Queue: %s" stA.Workers (drawBar stA.Queue 20)
         printfn "  Station B (Help) | Workers: %d | Queue: %s" stB.Workers (drawBar stB.Queue 20)
         if state.EventsLog.Length > 0 then
@@ -558,6 +577,16 @@ module Simulation =
             currentState <- simulationTick simParams rng currentState
             printDashboard currentState
             System.Threading.Thread.Sleep(150)
+
+        // Итоговая сводка
+        let stA = currentState.Stations["Station-A"]
+        let stB = currentState.Stations["Station-B"]
+        printfn "\n=== ИТОГИ СИМУЛЯЦИИ ==="
+        printfn "Всего поступило: %d" currentState.TotalReceived
+        printfn "Всего обработано: %d" currentState.TotalDispatched
+        printfn "Осталось в очередях: %d" (stA.Queue + stB.Queue)
+        printfn "Пиковая очередь (за всю историю): %d" (currentState.History |> List.max)
+        printfn "Финальное распределение работников: A=%d, B=%d" stA.Workers stB.Workers
 
 // ============================================================================
 // ТОЧКА ВХОДА
