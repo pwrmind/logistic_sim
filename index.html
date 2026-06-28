@@ -3,11 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <title>System Dynamics Network Flow IDE</title>
-    <!-- CDN: Tailwind CSS v3 (через Play CDN), Alpine.js, expr-eval, YAML парсер, Cytoscape.js -->
+    <!-- CDN: Tailwind CSS v3, Alpine.js, expr-eval, js-yaml, Cytoscape.js -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.1/dist/cdn.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/expr-eval@2.0.2/dist/bundle.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/yaml@2.3.1/dist/index.min.js"></script>
+    <!-- Замена YAML-парсера на js-yaml -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/cytoscape@3.28.1/dist/cytoscape.min.js"></script>
 </head>
 <body class="bg-[#1e1e2e] text-[#cdd6f4] h-screen flex flex-col overflow-hidden text-xs antialiased p-2"
@@ -114,7 +115,7 @@ class ConveyorBuffer {
         this.queue = this.queue.filter(item => {
             if (Math.abs(item.releaseTime - time) < 0.0001 || item.releaseTime <= time) {
                 total += item.amount;
-                return false; // удаляем выпущенные элементы
+                return false;
             }
             return true;
         });
@@ -139,7 +140,7 @@ function ideController() {
         cyInstance: null,
 
         initStudio() {
-            // Дефолтная хакатон-модель СЦ (Задачи 1+2+3)
+            // Дефолтная хакатон-модель СЦ
             this.dslCode = `settings:
   startTime: 0
   endTime: 12
@@ -204,7 +205,8 @@ flows:
             this.performanceText = '';
             
             try {
-                const rawYaml = YAML.parse(this.dslCode);
+                // Используем jsyaml.load вместо YAML.parse
+                const rawYaml = jsyaml.load(this.dslCode);
                 const compilation = this.validateNetwork(rawYaml);
 
                 if (!compilation.success) {
@@ -221,7 +223,6 @@ flows:
                 const t1 = performance.now();
                 this.performanceText = `Расчёт RK4 завершен за ${(t1 - t0).toFixed(2)} мс. Сгенерировано точек: ${this.simulationData.length}`;
 
-                // Универсальный анализ узких мест
                 this.evaluateBottlenecks(this.simulationData, settings.dt, compilation.stocks);
             } catch (e) {
                 this.errors = [e.message];
@@ -238,7 +239,6 @@ flows:
             const compiledFlows = [];
             const mathParser = new exprEval.Parser();
 
-            // Регистрация макросов времени (они будут использованы только при вычислении, не при парсинге)
             mathParser.functions.PULSE = (vol, pTime) => Math.abs(currentT - pTime) < 0.0001 ? vol : 0;
             mathParser.functions.STEP = (h, sTime) => currentT >= sTime ? h : 0;
             mathParser.functions.IF = (cond, t, f) => cond ? t : f;
@@ -276,7 +276,6 @@ flows:
             flows.forEach(f => {
                 this.cyInstance.add({ data: { id: f.name, source: f.from, target: f.to, flowName: f.name } });
             });
-            // Автоматическая раскладка графа для читаемости
             this.cyInstance.layout({ name: 'breadthfirst', directed: true, padding: 15 }).run();
         },
 
@@ -294,7 +293,6 @@ flows:
             const timeline = [];
             let t = settings.startTime;
 
-            // Вспомогательная функция: вычисляет все скорости потоков для данного состояния и времени
             const calcRates = (currState, currConveyors, currT) => {
                 const rates = {};
                 const context = { ...currState, t: currT };
@@ -308,11 +306,9 @@ flows:
                 return rates;
             };
 
-            // Вспомогательная функция: применяет дельты потоков к клонам состояний (для промежуточных шагов RK4)
             const integrateDeltas = (targetState, rates, targetConveyors, targetT, coef) => {
                 compiled.stocks.forEach(s => {
                     if (s.type === "Conveyor") {
-                        // Суммируем все входящие потоки (не Transit_End) в конвейер
                         const inFlows = compiled.flows.filter(f => f.to === s.name && f.type !== "Transit_End");
                         const totalInRate = inFlows.reduce((sum, f) => sum + rates[f.name], 0);
                         targetConveyors[s.name].push(totalInRate * coef, targetT);
@@ -329,36 +325,29 @@ flows:
             };
 
             while (t <= settings.endTime) {
-                currentT = t; // для макросов PULSE, STEP
+                currentT = t;
                 timeline.push({ time: t, state: { ...state } });
 
-                // --- Метод Рунге-Кутты 4-го порядка ---
-                // k1
                 const convK1 = {}; for(let k in conveyors) convK1[k] = conveyors[k].clone();
                 const ratesK1 = calcRates(state, convK1, t);
 
-                // k2
                 const stateK2 = { ...state };
                 const convK2 = {}; for(let k in conveyors) convK2[k] = conveyors[k].clone();
                 integrateDeltas(stateK2, ratesK1, convK2, t, dt * 0.5);
                 const ratesK2 = calcRates(stateK2, convK2, t + dt * 0.5);
 
-                // k3
                 const stateK3 = { ...state };
                 const convK3 = {}; for(let k in conveyors) convK3[k] = conveyors[k].clone();
                 integrateDeltas(stateK3, ratesK2, convK3, t, dt * 0.5);
                 const ratesK3 = calcRates(stateK3, convK3, t + dt * 0.5);
 
-                // k4
                 const stateK4 = { ...state };
                 const convK4 = {}; for(let k in conveyors) convK4[k] = conveyors[k].clone();
                 integrateDeltas(stateK4, ratesK3, convK4, t, dt);
                 const ratesK4 = calcRates(stateK4, convK4, t + dt);
 
-                // Итоговая интеграция (взвешенное среднее RK4)
                 compiled.stocks.forEach(stock => {
                     if (stock.type === "Conveyor") {
-                        // Для конвейера входы суммируются по стандартным потокам
                         const inFlows = compiled.flows.filter(f => f.to === stock.name && f.type !== "Transit_End");
                         const weightedInRate = inFlows.reduce((sum, f) => sum + (ratesK1[f.name] + 2*ratesK2[f.name] + 2*ratesK3[f.name] + ratesK4[f.name]) / 6, 0);
                         conveyors[stock.name].push(weightedInRate * dt, t);
@@ -380,7 +369,6 @@ flows:
         },
 
         evaluateBottlenecks(data, dt, stocks) {
-            // Универсальный поиск самого перегруженного накопителя
             let maxAvg = 0;
             let bottleneckStock = null;
             stocks.forEach(s => {
@@ -398,7 +386,6 @@ flows:
                 return;
             }
 
-            // Расчёт времени превышения порога (75% от пика)
             const peak = data.reduce((max, r) => Math.max(max, r.state[bottleneckStock.name] || 0), 0);
             const threshold = peak * 0.75;
             let overflowHours = 0;
